@@ -1,4 +1,6 @@
-# Nexus v1.0 - Multi-Agent Research Orchestrator
+# nexus-v2.0
+
+## Nexus v1.0 - Multi-Agent Research Orchestrator
 
 > Plataforma cognitiva que orquestra LLMs, ferramentas externas e memorias hibridas para executar pesquisas, gerar codigo e consolidar conhecimento.
 
