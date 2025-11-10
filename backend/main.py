@@ -503,7 +503,8 @@ def get_all_projects() -> List[DevProject]:
 def create_project_from_idea(input_data: IdeaInput) -> DevProject:
     structure = agente_arquiteto.structure_idea(input_data.text)
 
-    workspace_path = f"D:\\NexusProjects\\{structure.name.replace(' ', '_')}"
+    workspace_root = os.getenv("NEXUS_PROJECTS_ROOT", "/app/NexusProjects")
+    workspace_path = os.path.join(workspace_root, structure.name.replace(" ", "_"))
     os.makedirs(workspace_path, exist_ok=True)
 
     plan_path = os.path.join(workspace_path, "PLAN.md")

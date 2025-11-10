@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import traceback
@@ -7,11 +8,7 @@ from openai import OpenAI
 
 import ferramentas
 from agente_nqr import NexusQuantumReasoning
-
-try:  # pragma: no cover - modulo pode nao existir durante desenvolvimento
-    from nexus_graph import NexusGraph  # type: ignore
-except Exception:  # pragma: no cover
-    NexusGraph = None  # type: ignore[assignment]
+from nexus_graph import NexusGraph
 
 
 llm_client = OpenAI(
@@ -44,20 +41,11 @@ def _document_text(document: Any) -> str:
 
 
 def _attempt_quantum_search(context_of_use: str, search_query: str) -> List[Any]:
-    if NexusGraph is None:
-        return []
-
     try:
-        return NexusGraph.quantum_search(  # type: ignore[attr-defined]
+        return NexusGraph.quantum_search(
             query=search_query,
             context_of_use=context_of_use,
         )
-    except TypeError:
-        try:
-            return NexusGraph.quantum_search(search_query, context_of_use)  # type: ignore[attr-defined]
-        except Exception as error:  # noqa: BLE001
-            print(f"[Orquestrador] Falha no quantum_search fallback: {error}")
-            return []
     except Exception as error:  # noqa: BLE001
         print(f"[Orquestrador] Erro ao consultar NexusGraph.quantum_search: {error}")
         return []
@@ -86,34 +74,116 @@ def _serialize_documents(documents: Sequence[Any]) -> Tuple[str, List[Dict[str, 
     return "\n".join(context_lines), sources
 
 
-def _synthesize_answer(
-    *,
-    user_query: str,
-    context: str,
-    context_of_use: str,
-    low_confidence_alert: bool = False,
-) -> str:
+def _decompose_query(user_query: str) -> List[str]:
     system_prompt = (
-        "Voce e o Nexus. Utilize o contexto fornecido pelo NQR e responda de forma direta, "
-        "citando fontes quando aplicavel. Considere o contexto de uso informado pelo orquestrador."
+        "Você é o Decompositor de Consultas do Nexus. "
+        "Transforme a pergunta do usuário em 3 a 5 sub-perguntas de pesquisa independentes. "
+        "Retorne APENAS uma lista Python de strings."
     )
-    if low_confidence_alert:
-        system_prompt += " ALERTA: Informacao com baixa confianca detectada. Avise o usuario sobre a incerteza."
-    user_block = (
-        f"INTENCAO / CONTEXTO: {context_of_use}\n"
-        f"PERGUNTA: {user_query}\n\n"
-        f"CONTEXTOS PRIORIZADOS:\n{context}"
+    try:
+        response = llm_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query},
+            ],
+            temperature=0.2,
+        )
+        raw_list = response.choices[0].message.content.strip()
+        try:
+            parsed = json.loads(raw_list)
+        except json.JSONDecodeError:
+            parsed = ast.literal_eval(raw_list)
+        if isinstance(parsed, list):
+            cleaned = [str(item).strip() for item in parsed if str(item).strip()]
+            return cleaned[:5]
+    except Exception as error:  # noqa: BLE001
+        print(f"[Orquestrador] Falha ao decompor consulta: {error}")
+    return [user_query]
+
+
+def _synthesize_multi_source(
+    user_query: str,
+    all_results: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    consolidated_sources: List[Dict[str, str]] = []
+    seen_sources = set()
+    context_blocks: List[str] = []
+
+    for index, result in enumerate(all_results, start=1):
+        context = result.get("context")
+        if not context:
+            continue
+        label = result.get("label") or result.get("sub_query") or f"Fonte {index}"
+        context_blocks.append(f"[{label}]\n{context}")
+        for source in result.get("sources", []):
+            if not source:
+                continue
+            key = (source.get("title"), source.get("url"))
+            if key in seen_sources:
+                continue
+            seen_sources.add(key)
+            consolidated_sources.append(source)
+
+    combined_context = "\n\n".join(context_blocks)
+    if not combined_context:
+        return (
+            "Não consegui reunir contexto suficiente para responder com confiança.",
+            consolidated_sources,
+        )
+
+    system_prompt = (
+        "Você é o Consolidador de Investigação do Nexus. "
+        "Sintetize uma resposta abrangente para a pergunta do usuário, utilizando e citando todas as fontes fornecidas. "
+        "Mantenha a resposta fluida e informativa."
+    )
+    user_prompt = (
+        f"PERGUNTA DO USUARIO:\n{user_query}\n\n"
+        f"CONTEXTOS E FONTES:\n{combined_context}"
     )
 
     response = llm_client.chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_block},
+            {"role": "user", "content": user_prompt},
         ],
         temperature=0.3,
     )
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content.strip()
+    return answer, consolidated_sources
+
+
+def _check_for_hallucination(answer: str, context: str) -> Tuple[bool, str]:
+    if not answer or not context:
+        return True, "Contexto insuficiente para validacao."
+
+    system_prompt = (
+        "Você é o Verificador de Consistência Preditiva do Nexus. Analise se a RESPOSTA "
+        "está 100% contida ou inferível a partir do CONTEXTO. "
+        "Responda APENAS com um JSON: "
+        '{"consistent": true, "reason": "justificativa"}'
+    )
+    user_prompt = f"RESPOSTA:\n{answer}\n\nCONTEXTO DISPONIVEL:\n{context}"
+
+    try:
+        completion = llm_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        raw = completion.choices[0].message.content
+        payload = json.loads(raw)
+        consistent = bool(payload.get("consistent", True))
+        reason = str(payload.get("reason", "") or "").strip()
+        return consistent, reason
+    except Exception as error:  # noqa: BLE001
+        print(f"[Orquestrador][VCP] Falha ao verificar alucinacao: {error}")
+        return True, "Verificacao indisponivel."
 
 
 def _normalize_tool_output(raw_result: Any) -> Dict[str, Any]:
@@ -180,8 +250,10 @@ def _execute_tool_strategy(
         )
         if not fallback_tool:
             return {
-                "answer": "Nenhuma ferramenta disponivel para executar a pesquisa.",
+                "context": "Nenhuma ferramenta disponivel para executar a pesquisa.",
                 "sources": [],
+                "label": tool_name,
+                "sub_query": search_query,
             }
         tool_info = ferramentas.AVAILABLE_TOOLS[fallback_tool]
 
@@ -192,25 +264,18 @@ def _execute_tool_strategy(
 
     if not context or context.startswith("ERRO"):
         return {
-            "answer": context or "Nao encontrei informacoes suficientes.",
+            "context": context or "Nao encontrei informacoes suficientes.",
             "sources": sources,
+            "label": f"{tool_name} :: {search_query}",
+            "sub_query": search_query,
         }
 
-    try:
-        answer = _synthesize_answer(
-            user_query=user_query,
-            context=context,
-            context_of_use=context_of_use,
-        )
-        answer = nqr.self_correct_rag(answer, [])
-    except Exception as error:  # noqa: BLE001
-        print(f"[Orquestrador] Erro ao sintetizar (fallback): {error}\n{traceback.format_exc()}")
-        return {
-            "answer": "Erro ao sintetizar a resposta final.",
-            "sources": sources,
-        }
-
-    return {"answer": answer, "sources": sources}
+    return {
+        "context": context,
+        "sources": sources,
+        "label": f"{tool_name} :: {search_query}",
+        "sub_query": search_query,
+    }
 
 
 def search(user_query: str) -> Dict[str, Any]:
@@ -234,39 +299,73 @@ def search(user_query: str) -> Dict[str, Any]:
     )
 
     documents = _attempt_quantum_search(context_of_use, optimized_query)
+    all_results: List[Dict[str, Any]] = []
+    reranked_docs: List[Any] = []
 
     if documents:
         print(f"[Orquestrador] Quantum search retornou {len(documents)} documentos.")
         reranked_docs = nqr.re_rank_by_confidence(documents)
         low_confidence_alert = nqr.last_low_confidence
         context, sources = _serialize_documents(reranked_docs)
-
         if context:
-            try:
-                answer = _synthesize_answer(
-                    user_query=user_query,
-                    context=context,
-                    context_of_use=context_of_use,
-                    low_confidence_alert=low_confidence_alert,
-                )
-            except Exception as error:  # noqa: BLE001
-                print(f"[Orquestrador] Erro ao sintetizar com documentos do grafo: {error}")
-                return {
-                    "answer": "Erro ao sintetizar a resposta final.",
-                    "sources": sources,
+            label = "Quantum Search (Baixa confiança)" if low_confidence_alert else "Quantum Search"
+            all_results.append({"context": context, "sources": sources, "label": label})
+        else:
+            print("[Orquestrador] Contexto vazio apos reordenacao. Fallback para ferramentas classicas.")
+
+    sub_queries = _decompose_query(user_query)
+    if optimized_query not in sub_queries:
+        sub_queries = [optimized_query] + sub_queries
+
+    tool_results: List[Dict[str, Any]] = []
+    for sub_query in sub_queries:
+        tool_result = _execute_tool_strategy(
+            tool_name=tool_name,
+            search_query=sub_query,
+            user_query=user_query,
+            context_of_use=context_of_use,
+        )
+        if not tool_result.get("label"):
+            tool_result["label"] = f"Subconsulta: {sub_query}"
+        tool_results.append(tool_result)
+        if tool_result.get("context"):
+            all_results.append(
+                {
+                    "context": tool_result["context"],
+                    "sources": tool_result.get("sources", []),
+                    "label": tool_result["label"],
                 }
+            )
 
-            corrected = nqr.self_correct_rag(answer, reranked_docs)
+    if not all_results:
+        fallback = tool_results[0] if tool_results else None
+        if fallback:
+            answer = fallback.get("context") or "Não foi possível coletar informações suficientes."
             return {
-                "answer": corrected,
-                "sources": sources,
+                "answer": answer,
+                "sources": fallback.get("sources", []),
             }
+        return {
+            "answer": "Não foi possível coletar informações suficientes.",
+            "sources": [],
+        }
 
-        print("[Orquestrador] Contexto vazio apos reordenacao. Fallback para ferramentas classicas.")
-
-    return _execute_tool_strategy(
-        tool_name=tool_name,
-        search_query=optimized_query,
-        user_query=user_query,
-        context_of_use=context_of_use,
+    answer, consolidated_sources = _synthesize_multi_source(user_query, all_results)
+    combined_context_text = "\n\n".join(
+        entry["context"] for entry in all_results if entry.get("context")
     )
+    consistent, reason = _check_for_hallucination(answer, combined_context_text)
+    if not consistent:
+        print(f"[Orquestrador][VCP] Ajustando resposta consolidada: {reason}")
+        augmented_results = all_results + [
+            {"context": f"[ALERTA VCP] {reason}", "sources": [], "label": "VCP"}
+        ]
+        answer, consolidated_sources = _synthesize_multi_source(user_query, augmented_results)
+
+    if reranked_docs:
+        answer = nqr.self_correct_rag(answer, reranked_docs)
+
+    return {
+        "answer": answer,
+        "sources": consolidated_sources,
+    }
