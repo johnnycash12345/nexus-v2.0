@@ -29,6 +29,7 @@ import agente_executor
 import agente_pesquisa
 import agente_consolidacao
 import agente_noticias
+import ferramentas
 import database
 import genesis
 from db_connect import chroma_client, close_neo4j_connection, neo4j_driver
@@ -473,6 +474,10 @@ allowed_origins = [
 if not allowed_origins:
     allowed_origins = ["http://localhost:5173"]
 
+ngrok_origin = os.getenv("NGROK_URL", "").strip()
+if ngrok_origin and ngrok_origin not in allowed_origins:
+    allowed_origins.append(ngrok_origin)
+
 app = FastAPI(
     title="Nexus Backend",
     version="1.0.0",
@@ -491,6 +496,48 @@ app.add_middleware(
 @app.get("/")
 def read_root():
     return {"message": "Nexus Backend (Fase V1.0) Online"}
+
+
+@app.get("/api/capabilities")
+async def get_capabilities():
+    """
+    Retorna um manifesto de funcionalidades, agentes e ferramentas do Nexus.
+    """
+    tool_descriptions = ferramentas.get_tool_descriptions()
+
+    capabilities = {
+        "system_name": "Nexus v2.0 (Lumen Core)",
+        "description": "Uma IA cognitiva multiagente.",
+        "agents": [
+            {
+                "name": "Agente Central",
+                "description": "Gerencia o roteamento de intenções e a conversa.",
+                "endpoint": "/api/chat/send",
+                "modes": ["Chat Pessoal", "Lembrete", "Nota Simples"],
+            },
+            {
+                "name": "Agente de Pesquisa",
+                "description": "Executa pesquisas profundas e RAG.",
+                "endpoint": "/api/chat/send",
+                "modes": ["Pesquisa Profunda"],
+            },
+            {
+                "name": "Agente Arquiteto",
+                "description": "Gerencia a 'Fábrica de MVPs' e o Incubador de Ideias.",
+                "endpoint": "/api/projects/from_idea",
+                "modes": ["Projeto", "Ideia", "Arquitetura"],
+            },
+            {
+                "name": "Agente de Código",
+                "description": "Gera e refatora código.",
+                "endpoint": "/api/code/generate",
+                "modes": ["Código"],
+            },
+        ],
+        "tools": tool_descriptions,
+        "status_endpoint": "/api/status",
+    }
+    return capabilities
 
 
 @app.post("/api/projects/new", response_model=DevProject)
