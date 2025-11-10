@@ -1,8 +1,11 @@
+import ast
 import os
 
 from openai import OpenAI
 
-client = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+client = OpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com"
+)
 
 
 def generate_code(prompt: str) -> str:
@@ -19,7 +22,12 @@ def generate_code(prompt: str) -> str:
             ],
             temperature=0.2,
         )
-        return response.choices[0].message.content
+        generated_code = response.choices[0].message.content
+        try:
+            ast.parse(generated_code)
+        except SyntaxError:
+            return "# ERRO DE SINTAXE: O código gerado não é Python válido. Por favor, tente novamente."
+        return generated_code
     except Exception as error:  # noqa: BLE001
         return f"# ERRO NA API DEEPSEEK: {error}"
 

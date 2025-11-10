@@ -5,7 +5,7 @@ import os
 from typing import Any, Dict, Tuple, Type
 
 import requests
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from pydantic import ValidationError, create_model
 from tavily import TavilyClient
 
@@ -36,7 +36,9 @@ def register_tool(
 
         def wrapped_func(*args, **kwargs):
             if not usage_tracker.can_use_api(limit_key):
-                print(f"[Tool {name}] BLOQUEADA: limite diario de '{limit_key}' atingido.")
+                print(
+                    f"[Tool {name}] BLOQUEADA: limite diario de '{limit_key}' atingido."
+                )
                 return f"ERRO: limite diario de uso atingido para {limit_key}. Tente novamente amanha."
             usage_tracker.track_usage(limit_key)
             return func(*args, **kwargs)
@@ -76,7 +78,9 @@ def get_tool_descriptions() -> Dict[str, str]:
             )
             descriptions[name] = formatted
         else:
-            descriptions[name] = f"{name}() - {data.get('description', 'Sem descricao')}"
+            descriptions[name] = (
+                f"{name}() - {data.get('description', 'Sem descricao')}"
+            )
     return descriptions
 
 
@@ -89,8 +93,7 @@ def get_tools_prompt() -> str:
         params = info.get("parameters") or {}
         if params:
             signature = ", ".join(
-                f"{param} ({meta.get('type', 'str')})"
-                for param, meta in params.items()
+                f"{param} ({meta.get('type', 'str')})" for param, meta in params.items()
             )
             lines.append(f"- '{name}({signature})': {info['description']}")
         else:
@@ -122,7 +125,9 @@ def _build_argument_model(tool_name: str):
     return model, "__dummy" in fields
 
 
-def validate_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def validate_tool_arguments(
+    tool_name: str, arguments: Dict[str, Any]
+) -> Dict[str, Any]:
     model, has_dummy = _build_argument_model(tool_name)
     cleaned_args = arguments or {}
 

@@ -1,9 +1,8 @@
-import json
 import os
 from datetime import datetime
 from typing import Dict, List
 
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from openai import OpenAI
 
 client = OpenAI(
@@ -71,7 +70,9 @@ def search_news(topic: str) -> dict:
         formatted_sources: List[Dict[str, str]] = []
         for item in news_results:
             title = item.split("\n")[0].replace("- Título: ", "")
-            link_part = [line for line in item.split("\n") if line.strip().startswith("Link: ")]
+            link_part = [
+                line for line in item.split("\n") if line.strip().startswith("Link: ")
+            ]
             url = link_part[0].replace("Link: ", "").strip() if link_part else ""
             formatted_sources.append({"title": title, "url": url})
 

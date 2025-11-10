@@ -1,18 +1,24 @@
 from __future__ import annotations
-from dotenv import load_dotenv
-load_dotenv()
 
 import os
-import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from openai import OpenAI
+from pydantic import BaseModel
+
+try:  # pragma: no cover
+    from neo4j.time import Date as Neo4jDate
+    from neo4j.time import DateTime as Neo4jDateTime
+    from neo4j.time import Duration as Neo4jDuration
+    from neo4j.time import Time as Neo4jTime
+except ImportError:  # pragma: no cover
+    Neo4jDate = Neo4jDateTime = Neo4jDuration = Neo4jTime = tuple()
 
 import agente_central
 import agente_codigo
@@ -20,7 +26,6 @@ import agente_executor
 import agente_pesquisa
 import agente_consolidacao
 import agente_noticias
-import ferramentas
 import database
 import genesis
 from db_connect import chroma_client, close_neo4j_connection, neo4j_driver
@@ -45,6 +50,7 @@ from models import (
     SystemSettings,
 )
 
+load_dotenv()
 chat_client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com",
@@ -120,6 +126,21 @@ def log_event(
 
 
 FileNode.model_rebuild()
+
+
+def _serialize_neo4j_value(value: Any) -> Any:
+    """
+    Converte valores Neo4j (DateTime, Duration etc.) em tipos serializáveis.
+    """
+    if isinstance(value, (Neo4jDateTime, Neo4jDate, Neo4jTime, Neo4jDuration)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_serialize_neo4j_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_serialize_neo4j_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _serialize_neo4j_value(val) for key, val in value.items()}
+    return value
 
 
 def get_directory_structure(root_path: str) -> List[FileNode]:
@@ -219,7 +240,9 @@ def synthesize_tool_response(user_query: str, tool_name: str, tool_result: str) 
         )
         return response.choices[0].message.content.strip()
     except Exception as error:  # noqa: BLE001
-        print(f"[Endpoint /api/chat/send] Falha ao sintetizar resposta de ferramenta: {error}")
+        print(
+            f"[Endpoint /api/chat/send] Falha ao sintetizar resposta de ferramenta: {error}"
+        )
         return (
             "Executei a ferramenta solicitada, mas não consegui gerar uma resposta formatada. "
             f"Resultado bruto:\n{tool_result}"
@@ -242,7 +265,10 @@ def check_service_health(service_name: str) -> Tuple[bool, str]:
             chat_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "Você é um verificador de status. Responda 'OK'."},
+                    {
+                        "role": "system",
+                        "content": "Você é um verificador de status. Responda 'OK'.",
+                    },
                     {"role": "user", "content": "Ping de saúde. Responda apenas OK."},
                 ],
                 max_tokens=5,
@@ -253,6 +279,7 @@ def check_service_health(service_name: str) -> Tuple[bool, str]:
         return False, f"Serviço '{service_name}' desconhecido."
     except Exception as error:
         return False, str(error)
+
 
 def retrieve_long_term_context(
     content: str,
@@ -435,6 +462,15 @@ def generate_chat_response(
         )
 
 
+# Le a variavel de ambiente ALLOWED_ORIGINS com urls separados por virgula.
+origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+# Divide a string em uma lista, removendo espacos extras e ignorando entradas vazias.
+allowed_origins = [
+    origin.strip() for origin in origins_str.split(",") if origin.strip()
+]
+if not allowed_origins:
+    allowed_origins = ["http://localhost:5173"]
+
 app = FastAPI(
     title="Nexus Backend",
     version="1.0.0",
@@ -443,7 +479,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -677,7 +714,9 @@ def post_chat(
             session_id=session_id,
         )
     elif final_mode == "Chat Pessoal":
-        print("[Endpoint /api/chat/send] MODO: Conversa Pessoal. Chamando Agente de Chat (LLM).")
+        print(
+            "[Endpoint /api/chat/send] MODO: Conversa Pessoal. Chamando Agente de Chat (LLM)."
+        )
 
         assist_content, assist_sources = generate_chat_response(
             content,
@@ -698,7 +737,9 @@ def post_chat(
             session_id=session_id,
         )
     elif final_mode == "Executar Ferramenta":
-        print("[Endpoint /api/chat/send] OFBD ativo. Executando ferramenta sugerida pelo DeepSeek.")
+        print(
+            "[Endpoint /api/chat/send] OFBD ativo. Executando ferramenta sugerida pelo DeepSeek."
+        )
         tool_plan = intent_payload or {}
         tool_name = tool_plan.get("tool_name")
         arguments = tool_plan.get("arguments") or {}
@@ -718,7 +759,9 @@ def post_chat(
         assistant_answer = synthesize_tool_response(content, tool_name, tool_result)
         sources = []
     elif final_mode == "Ideia":
-        print("[Endpoint /api/chat/send] Roteando para Incubador de Ideias (Agente Arquiteto)...")
+        print(
+            "[Endpoint /api/chat/send] Roteando para Incubador de Ideias (Agente Arquiteto)..."
+        )
         try:
             agente_arquiteto.process_new_idea(content)
             assistant_answer = (
@@ -740,9 +783,7 @@ def post_chat(
                 created_at=datetime.now().isoformat(),
             )
             create_inbox_item(new_item)
-            assistant_answer = (
-                f"Entendido. Classifiquei como '{final_mode}' e salvei na sua Caixa de Entrada."
-            )
+            assistant_answer = f"Entendido. Classifiquei como '{final_mode}' e salvei na sua Caixa de Entrada."
         except Exception as error:
             print(f"[Endpoint /api/chat/send] Erro ao salvar no Neo4j: {error}")
             raise HTTPException(
@@ -812,7 +853,7 @@ def get_memory_graph() -> GraphData:
                 GraphNode(
                     id=record["id"],
                     label=label,
-                    properties=record["props"],
+                    properties=_serialize_neo4j_value(dict(record["props"])),
                 )
             )
 
@@ -861,7 +902,9 @@ def get_proactive_chat(item_id: str):
 
 
 @app.post("/api/inbox/chat/{item_id}", response_model=List[ChatMessage])
-def post_proactive_chat_response(item_id: str, input_data: ChatInput) -> List[ChatMessage]:
+def post_proactive_chat_response(
+    item_id: str, input_data: ChatInput
+) -> List[ChatMessage]:
     """
     Recebe a RESPOSTA do usuario no Chat Dedicado,
     processa a intencao, chama o Agente Executor e
@@ -880,7 +923,9 @@ def post_proactive_chat_response(item_id: str, input_data: ChatInput) -> List[Ch
     positive_responses = ["sim", "ok", "confirma", "pode", "gostaria", "faca"]
 
     if any(res in user_content.lower() for res in positive_responses):
-        print(f"[Endpoint /api/inbox/chat/{item_id}] Intencao positiva detectada. Acionando Agente Executor...")
+        print(
+            f"[Endpoint /api/inbox/chat/{item_id}] Intencao positiva detectada. Acionando Agente Executor..."
+        )
 
         item = get_inbox_item_by_id(item_id)
 
@@ -936,11 +981,3 @@ def refactor_code_endpoint(request: CodeRefactorRequest):
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
-
-
-
-
-
-
-
