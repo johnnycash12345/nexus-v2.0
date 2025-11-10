@@ -210,6 +210,7 @@ Repositorio monorepo: frontend na raiz (`src/`) e backend em `backend/`.
 
 - **Tecnologias:** React 18, Vite 6, Radix UI, CMDK, Embla Carousel, Lucide Icons, Tailwind-merge, Sonner notifications.
 - **Guides:** Documentacao completa em `src/NEXUS_DOCUMENTATION.md`, quick start em `src/QUICK_START.md`, exemplos de integracao em `src/API_INTEGRATION_EXAMPLES.md`.
+- **Design Hand-off:** `README_FIGMA.md` descreve todo o blueprint esperado no Figma (layout, componentes, estados e contratos com o backend).
 - **Modulos principais:**
   - Search & Chat (perguntas orquestradas com fontes).
   - Personal Chat (conversa livre + memorizacao).

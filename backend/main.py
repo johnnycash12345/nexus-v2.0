@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -19,6 +20,7 @@ import agente_executor
 import agente_pesquisa
 import agente_consolidacao
 import agente_noticias
+import ferramentas
 import database
 import genesis
 from db_connect import chroma_client, close_neo4j_connection, neo4j_driver
@@ -191,6 +193,67 @@ def background_learning_task(text_to_learn: str, source_topic: str):
     except Exception as error:
         print(f"[Background] ERRO durante o aprendizado: {error}")
 
+
+def synthesize_tool_response(user_query: str, tool_name: str, tool_result: str) -> str:
+    """
+    Gera uma resposta amigável ao usuário com base no resultado de uma ferramenta.
+    """
+    system_prompt = (
+        "Você é o sintetizador do Nexus. Com base no resultado retornado por uma "
+        "ferramenta, elabore uma resposta clara para o usuário, explicando como a "
+        "ferramenta foi utilizada."
+    )
+    user_prompt = (
+        f"Pergunta original:\n{user_query}\n\n"
+        f"Ferramenta utilizada: {tool_name}\n"
+        f"Resultado bruto:\n{tool_result}"
+    )
+    try:
+        response = chat_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as error:  # noqa: BLE001
+        print(f"[Endpoint /api/chat/send] Falha ao sintetizar resposta de ferramenta: {error}")
+        return (
+            "Executei a ferramenta solicitada, mas não consegui gerar uma resposta formatada. "
+            f"Resultado bruto:\n{tool_result}"
+        )
+
+
+def check_service_health(service_name: str) -> Tuple[bool, str]:
+    normalized = service_name.strip().lower()
+    try:
+        if normalized == "neo4j":
+            with neo4j_driver.session() as session:
+                session.run("RETURN 1 AS ok").single()
+            return True, "OK"
+
+        if normalized == "chromadb":
+            chroma_client.list_collections()
+            return True, "OK"
+
+        if normalized == "deepseek":
+            chat_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "Você é um verificador de status. Responda 'OK'."},
+                    {"role": "user", "content": "Ping de saúde. Responda apenas OK."},
+                ],
+                max_tokens=5,
+                temperature=0.0,
+            )
+            return True, "OK"
+
+        return False, f"Serviço '{service_name}' desconhecido."
+    except Exception as error:
+        return False, str(error)
+
 def retrieve_long_term_context(
     content: str,
     session_id: str | None,
@@ -214,9 +277,7 @@ def retrieve_long_term_context(
                 result = session.run(
                     """
                     MATCH (n)
-                    WHERE toLower(coalesce(n.name, '')) CONTAINS $term
-                       OR toLower(coalesce(n.title, '')) CONTAINS $term
-                       OR toLower(coalesce(n.description, '')) CONTAINS $term
+                    WHERE toLower(coalesce(n.name, n.title, n.description, '')) CONTAINS $term
                     OPTIONAL MATCH (n)-[r]->(m)
                     WITH n, collect({rel: type(r), target: coalesce(m.name, m.title, m.id, '')}) AS rels
                     RETURN n, rels
@@ -583,8 +644,16 @@ def post_chat(
     ]
 
     final_mode = suggested_mode
+    intent_payload: Dict[str, Any] | None = None
     if suggested_mode in ("Modo: Chat Pessoal", "Chat Pessoal"):
-        final_mode = agente_central.classify_intent(content, history_for_classifier)
+        classification_result = agente_central.classify_intent(
+            content,
+            history_for_classifier,
+        )
+        if isinstance(classification_result, tuple):
+            final_mode, intent_payload = classification_result
+        else:
+            final_mode = classification_result
     print(f"[Roteador Principal] Modo Final Decidido: {final_mode}")
 
     assistant_answer: str
@@ -627,6 +696,35 @@ def post_chat(
             sources=assist_sources,
             session_id=session_id,
         )
+    elif final_mode == "Executar Ferramenta":
+        print("[Endpoint /api/chat/send] OFBD ativo. Executando ferramenta sugerida pelo DeepSeek.")
+        tool_plan = intent_payload or {}
+        tool_name = tool_plan.get("tool_name")
+        arguments = tool_plan.get("arguments") or {}
+
+        if not tool_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Plano de ferramenta inválido: nome não fornecido.",
+            )
+
+        tool_result = agente_executor.execute_dynamic_tool(tool_name, arguments)
+        assistant_answer = synthesize_tool_response(content, tool_name, tool_result)
+        sources = []
+    elif final_mode == "Ideia":
+        print("[Endpoint /api/chat/send] Roteando para Incubador de Ideias (Agente Arquiteto)...")
+        try:
+            agente_arquiteto.process_new_idea(content)
+            assistant_answer = (
+                "Incrível! Capturei sua ideia, gerei objetivos iniciais e criei um lembrete proativo "
+                "para o próximo passo. Você pode acompanhar na Caixa de Entrada."
+            )
+        except Exception as error:
+            print(f"[Endpoint /api/chat/send] Erro ao incubar ideia: {error}")
+            raise HTTPException(
+                status_code=500,
+                detail="Não consegui processar a ideia agora. Tente novamente em instantes.",
+            )
     elif final_mode in ["Lembrete", "Projeto", "Nota Simples", "Lista"]:
         print("[Endpoint /api/chat/send] Roteando para Caixa de Entrada (Neo4j)...")
         try:
@@ -663,6 +761,30 @@ def post_chat(
         sources=sources,
         session_id=session_id,
     )
+
+
+@app.get("/status")
+def get_system_status():
+    monitored = ["Neo4j", "ChromaDB", "DeepSeek"]
+    services_status: Dict[str, Dict[str, Any]] = {}
+    failed_services: Dict[str, str] = {}
+
+    for service in monitored:
+        healthy, detail = check_service_health(service)
+        services_status[service] = {"healthy": healthy, "detail": detail}
+        if not healthy:
+            failed_services[service] = detail
+
+    diagnostic_message = (
+        agente_central.generate_diagnostic_message(failed_services)
+        if failed_services
+        else "Todos os serviços operacionais."
+    )
+
+    return {
+        "services": services_status,
+        "diagnostic": diagnostic_message,
+    }
 
 
 @app.get("/api/memory/graph", response_model=GraphData)

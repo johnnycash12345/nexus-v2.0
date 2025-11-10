@@ -1,15 +1,24 @@
 import json
 import os
+from typing import Any, Dict
+
 import requests
 from tavily import TavilyClient
 from ddgs import DDGS
 
 import usage_tracker
 
-AVAILABLE_TOOLS = {}
+AVAILABLE_TOOLS: Dict[str, Dict[str, Any]] = {}
 
 
-def register_tool(name, description, func, required_env_var=None, limit_key=None):
+def register_tool(
+    name: str,
+    description: str,
+    func,
+    required_env_var: str | None = None,
+    limit_key: str | None = None,
+    parameters: Dict[str, str] | None = None,
+):
     if required_env_var and not os.getenv(required_env_var):
         return
 
@@ -25,10 +34,31 @@ def register_tool(name, description, func, required_env_var=None, limit_key=None
     else:
         final_func = func
 
-    AVAILABLE_TOOLS[name] = {
-        'description': description,
-        'function': final_func,
-    }
+AVAILABLE_TOOLS[name] = {
+    "description": description,
+    "function": final_func,
+    "parameters": parameters or {},
+}
+
+
+def get_tool_descriptions() -> Dict[str, str]:
+    """
+    Retorna descrições legíveis das ferramentas para o DeepSeek.
+    """
+    descriptions: Dict[str, str] = {}
+    for name, data in AVAILABLE_TOOLS.items():
+        params = data.get("parameters", {})
+        if params:
+            signature = ", ".join(params.keys())
+            params_details = "; ".join(f"{param}: {desc}" for param, desc in params.items())
+            formatted = (
+                f"{name}({signature}) - {data.get('description', 'Sem descrição')} "
+                f"Parâmetros: {params_details}"
+            )
+        else:
+            formatted = f"{name}() - {data.get('description', 'Sem descrição')}"
+        descriptions[name] = formatted
+    return descriptions
 
 
 def _tool_tavily(query: str) -> str:
@@ -46,6 +76,9 @@ register_tool(
     _tool_tavily,
     required_env_var='TAVILY_API_KEY',
     limit_key='tavily',
+    parameters={
+        "query": "Pergunta ou instrução detalhada para a API Tavily (str, obrigatório)."
+    },
 )
 
 
@@ -69,6 +102,9 @@ register_tool(
     _tool_nasa,
     required_env_var='NASA_API_KEY',
     limit_key='nasa',
+    parameters={
+        "query": "Tema ou palavra-chave de astronomia desejada (str, opcional; por padrão retorna o APOD do dia)."
+    },
 )
 
 
@@ -87,6 +123,9 @@ register_tool(
     'news_search',
     'Use apenas para noticias recentes, manchetes do dia ou eventos em tempo real.',
     _tool_ddg_news,
+    parameters={
+        "query": "Assunto ou palavra-chave a ser consultada nas notícias (str, obrigatório)."
+    },
 )
 
 
@@ -96,6 +135,11 @@ def get_tools_prompt() -> str:
 
     lines = ['FERRAMENTAS DISPONIVEIS:']
     for name, data in AVAILABLE_TOOLS.items():
-        lines.append(f"- '{name}': {data['description']}")
+        params = data.get("parameters") or {}
+        if params:
+            param_list = "; ".join(f"{param}" for param in params.keys())
+            lines.append(f"- '{name}({param_list})': {data['description']}")
+        else:
+            lines.append(f"- '{name}': {data['description']}")
     return '\n'.join(lines)
 
