@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import os
@@ -19,6 +20,8 @@ try:  # pragma: no cover
     from neo4j.time import Time as Neo4jTime
 except ImportError:  # pragma: no cover
     Neo4jDate = Neo4jDateTime = Neo4jDuration = Neo4jTime = tuple()
+
+load_dotenv()
 
 import agente_central
 import agente_codigo
@@ -50,7 +53,6 @@ from models import (
     SystemSettings,
 )
 
-load_dotenv()
 chat_client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com",
