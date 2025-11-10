@@ -709,7 +709,12 @@ def post_chat(
                 detail="Plano de ferramenta inválido: nome não fornecido.",
             )
 
-        tool_result = agente_executor.execute_dynamic_tool(tool_name, arguments)
+        try:
+            tool_result = agente_executor.execute_dynamic_tool(tool_name, arguments)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        except RuntimeError as error:
+            raise HTTPException(status_code=500, detail=str(error))
         assistant_answer = synthesize_tool_response(content, tool_name, tool_result)
         sources = []
     elif final_mode == "Ideia":

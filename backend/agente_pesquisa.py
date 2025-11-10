@@ -8,7 +8,11 @@ from openai import OpenAI
 
 import ferramentas
 from agente_nqr import NexusQuantumReasoning
-from nexus_graph import NexusGraph
+
+try:  # pragma: no cover
+    from nexus_graph import NexusGraph  # type: ignore
+except Exception:  # pragma: no cover
+    NexusGraph = None  # type: ignore[assignment]
 
 
 llm_client = OpenAI(
@@ -41,6 +45,9 @@ def _document_text(document: Any) -> str:
 
 
 def _attempt_quantum_search(context_of_use: str, search_query: str) -> List[Any]:
+    if NexusGraph is None:
+        return []
+
     try:
         return NexusGraph.quantum_search(
             query=search_query,

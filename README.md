@@ -221,6 +221,17 @@ Repositorio monorepo: frontend na raiz (`src/`) e backend em `backend/`.
   - Cognitive Monitor (status dos 3 agentes principais).
 - UI responsiva para desktop (>= 1280px), tema dark com ciano, roxo e dourado.
 
+### Componentes ↔ Endpoint ↔ Payload
+
+| Componente/Função | Endpoint | Request principal | Observações de resposta |
+| --- | --- | --- | --- |
+| Composer Pesquisa/Chat | `POST /api/chat/send` | `{"session_id": "uuid", "content": "texto do usuário"}` | Resposta `PerplexicaResponse` com `answer`, `sources[]`, `session_id`. Mostrar fontes em lista clicável. |
+| Execução de Ferramenta (OFBD) | `POST /api/chat/send` → intenção `Executar Ferramenta` | Payload OFBD: `{"tool_name": "news_search", "arguments": {"query": "OpenAI", "max_results": 3}}` | Backend executa ferramenta e retorna resposta sintetizada via DeepSeek. Indicar ferramenta utilizada e resultado bruto em detalhe expansível. |
+| Incubador de Ideias | `POST /api/projects/from_idea` | `{"text": "Quero um copiloto de pesquisa..."}` | Retorna `DevProject` (nome, descrição, `workspace_path`, `tech_stack[]`). Mostrar CTA para abrir projeto/timeline. |
+| Inbox Proativo / Executor | `GET/POST /api/inbox/chat/{item_id}` | `POST {"content": "sim, execute"}` | Utilizado para confirmar execuções do Agente Executor. Mostrar badges de status e histórico de mensagens. |
+| Status & Diagnóstico | `GET /status` | – | `{ services: {Neo4j/Chroma/DeepSeek}, diagnostic }`. Renderizar cards com estado (OK/Degradado) + mensagem proativa. |
+| Memória Gráfica | `GET /api/memory/graph` | – | `GraphData {nodes[], links[]}`. Exibir grafo interativo com fallback tabular. |
+
 ## Configuracao e execucao
 
 ### Requisitos
@@ -242,6 +253,12 @@ Repositorio monorepo: frontend na raiz (`src/`) e backend em `backend/`.
 | `NEO4J_PASSWORD` | Sim | Default `nexuspassword123`. Troque em producao. |
 | `CHROMA_HOST` | Sim | Default `localhost`. |
 | `CHROMA_PORT` | Sim | Default `8005` (exposto por docker-compose). |
+
+### Qualidade e Deploy
+
+1. **CI Automático**: o workflow `.github/workflows/ci.yml` executa `pytest` (backend) e `npm run build` (frontend) em todo push/pull request para `main`. Ajuste os testes conforme novos módulos forem criados.
+2. **Pre-commit Hooks**: instale com `pip install pre-commit && pre-commit install`. O arquivo `.pre-commit-config.yaml` aplica `ruff`, `ruff-format` e correções básicas antes de cada commit.
+3. **Ambiente isolado**: para testes do OFBD, use ambientes sandbox (Docker/WSL) e não execute comandos fora da whitelist do executor.
 
 ### Levantando ambiente completo
 

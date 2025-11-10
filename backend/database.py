@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from chromadb.utils import embedding_functions
 
@@ -27,14 +27,25 @@ DEFAULT_SYNAPTIC_STRENGTH = 1.0
 DEFAULT_REL_CONTEXTUAL_RELEVANCE = 1.0
 
 
-def create_inbox_item(item: InboxItem) -> InboxItem:
+def create_inbox_item(item: Union[InboxItem, str], item_type: Optional[str] = None) -> InboxItem:
     """Persist a new :InboxItem node in Neo4j."""
+    if isinstance(item, InboxItem):
+        payload = item
+    else:
+        if not item_type:
+            raise ValueError("item_type is required when passing raw content.")
+        payload = InboxItem(
+            content=str(item),
+            type=item_type,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
     with neo4j_driver.session() as session:
         session.run(
             "CREATE (i:InboxItem {id: $id, content: $content, type: $type, created_at: $created_at})",
-            **item.model_dump(),
+            **payload.model_dump(),
         )
-    return item
+    return payload
 
 
 def create_chat_session(title: str) -> ChatSession:
@@ -205,6 +216,20 @@ def create_log(log: SystemLog):
             )
 
 
+def _log_audit_event(title: str, description: str) -> None:
+    try:
+        log = SystemLog(
+            timestamp=datetime.now().isoformat(),
+            type="audit",
+            title=title,
+            description=description,
+            agent="Database",
+        )
+        create_log(log)
+    except Exception as error:  # noqa: BLE001
+        print(f"[Database] Falha ao registrar auditoria: {error}")
+
+
 def get_recent_logs(limit: int = 50) -> List[SystemLog]:
     with neo4j_driver.session() as session:
         result = session.run(
@@ -320,11 +345,95 @@ def save_meta_knowledge(entries: List[Dict[str, str]]):
             )
 
 
-def register_memory_activation(node_id: str, boost: float = 1.0, validated: bool = False):
+def save_meta_prompt(task_type: str, optimized_prompt: str) -> None:
     """
-    Reforca um nodo de memoria existente, atualizando forca sinaptica e marcando validacoes.
+    Persiste um prompt otimizado associado a um tipo de tarefa.
     """
-    if not node_id:
+    if not task_type or not optimized_prompt:
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with neo4j_driver.session() as session:
+        session.run(
+            """
+            MERGE (t:Task_Type {name: $task_type})
+            MERGE (p:Meta_Prompt {task_type: $task_type})
+            SET p.prompt = $prompt,
+                p.updated_at = datetime($timestamp)
+            MERGE (t)-[:USA_META_PROMPT]->(p)
+            """,
+            task_type=task_type,
+            prompt=optimized_prompt,
+            timestamp=timestamp,
+        )
+
+
+def get_meta_prompt(task_type: str) -> str | None:
+    if not task_type:
+        return None
+
+    with neo4j_driver.session() as session:
+        record = session.run(
+            """
+            MATCH (t:Task_Type {name: $task_type})-[:USA_META_PROMPT]->(p:Meta_Prompt)
+            RETURN p.prompt AS prompt
+            ORDER BY p.updated_at DESC
+            LIMIT 1
+            """,
+            task_type=task_type,
+        ).single()
+        if record:
+            return record["prompt"]
+    return None
+
+
+def save_blueprint_path(path: str) -> None:
+    """
+    Armazena o caminho do script de restauração cognitiva.
+    """
+    if not path:
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with neo4j_driver.session() as session:
+        session.run(
+            """
+            MERGE (b:Blueprint_Cognitivo {id: 'LATEST_BLUEPRINT'})
+            SET b.path = $path,
+                b.updated_at = datetime($timestamp)
+            """,
+            path=path,
+            timestamp=timestamp,
+        )
+
+
+def get_least_activated_documents(limit: int) -> List[str]:
+    """
+    Retorna IDs de documentos (ChatMessage/Fato) com menos ativações e mais antigos.
+    """
+    if limit <= 0:
+        return []
+
+    query = """
+        MATCH (n)
+        WHERE (n:ChatMessage OR n:Fato) AND n.id IS NOT NULL
+        WITH n,
+             coalesce(n.activation_count, 0) AS activations,
+             coalesce(n.ultima_ativacao, datetime('1970-01-01T00:00:00Z')) AS last_activation
+        RETURN n.id AS id
+        ORDER BY activations ASC, last_activation ASC
+        LIMIT $limit
+    """
+    with neo4j_driver.session() as session:
+        result = session.run(query, limit=limit)
+        return [record["id"] for record in result if record and record.get("id")]
+
+
+def register_memory_activation(node_id: str, boost: float) -> None:
+    """
+    Ajusta a confianca intrinseca de um nodo de fato no Neo4j.
+    """
+    if not node_id or boost is None:
         return
 
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -332,31 +441,157 @@ def register_memory_activation(node_id: str, boost: float = 1.0, validated: bool
         session.run(
             """
             MATCH (n {id: $node_id})
-            SET n.forca_sinaptica = coalesce(n.forca_sinaptica, $base_strength) + $boost,
-                n.ultima_ativacao = datetime($timestamp),
-                n.status_memoria = coalesce(n.status_memoria, $default_status),
-                n.confianca_intrinseca = CASE
-                    WHEN n.status_memoria = 'MCP'
-                        THEN coalesce(n.confianca_intrinseca, $default_confidence)
-                    ELSE coalesce(n.confianca_intrinseca, $default_confidence)
+            WITH n, coalesce(n.confianca_intrinseca, $default_confidence) AS current_conf
+            SET n.confianca_intrinseca = CASE
+                    WHEN current_conf + $boost > 1.0 THEN 1.0
+                    WHEN current_conf + $boost < 0.0 THEN 0.0
+                    ELSE current_conf + $boost
                 END,
-                n.validado_nqr = CASE
-                    WHEN $validated THEN true
-                    ELSE coalesce(n.validado_nqr, false)
-                END,
-                n.ultima_validacao_nqr = CASE
-                    WHEN $validated THEN datetime($timestamp)
-                    ELSE n.ultima_validacao_nqr
-                END
+                n.ultima_ativacao = datetime($timestamp)
             """,
             node_id=node_id,
-            boost=boost,
+            boost=float(boost),
             timestamp=timestamp,
-            validated=validated,
-            base_strength=DEFAULT_SYNAPTIC_STRENGTH,
-            default_status=DEFAULT_MEMORY_STATUS,
             default_confidence=DEFAULT_INTRINSIC_CONFIDENCE,
         )
+
+
+def register_cognitive_dissonance(node_id: str, dissonance_text: str) -> None:
+    """
+    Cria um nodo de Dissonancia que contradiz o fato informado.
+    """
+    if not node_id or not dissonance_text:
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    dissonance_id = str(uuid.uuid4())
+
+    with neo4j_driver.session() as session:
+        session.run(
+            """
+            MATCH (f {id: $node_id})
+            CREATE (d:Dissonancia {
+                id: $dissonance_id,
+                timestamp: datetime($timestamp),
+                description: $description
+            })
+            MERGE (d)-[:CONTRADIZ]->(f)
+            """,
+            node_id=node_id,
+            dissonance_id=dissonance_id,
+            timestamp=timestamp,
+            description=dissonance_text,
+        )
+
+
+def save_context_summary(session_id: str, summary_text: str) -> None:
+    """
+    Persiste um resumo contextual ligado a uma sessao de chat.
+    """
+    if not session_id or not summary_text:
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    summary_id = str(uuid.uuid4())
+
+    with neo4j_driver.session() as session:
+        session.run(
+            """
+            MATCH (s:ChatSession {id: $session_id})
+            MERGE (r:Resumo_Contextual {id: $summary_id})
+            SET r.summary = $summary,
+                r.timestamp = datetime($timestamp)
+            MERGE (s)-[:TEM_RESUMO]->(r)
+            """,
+            session_id=session_id,
+            summary_id=summary_id,
+            summary=summary_text,
+            timestamp=timestamp,
+        )
+
+
+def delete_chroma_documents(document_ids: List[str]) -> None:
+    """
+    Remove documentos do ChromaDB independente da coleção.
+    """
+    if not document_ids:
+        return
+
+    try:
+        collections = chroma_client.list_collections()
+    except Exception as error:
+        print(f"[Chroma] Falha ao listar coleções: {error}")
+        return
+
+    removed_from: List[str] = []
+    for info in collections:
+        try:
+            try:
+                collection = chroma_client.get_collection(name=info.name)
+            except TypeError:
+                collection = chroma_client.get_collection(
+                    name=info.name,
+                    embedding_function=default_embedding_function,
+                )
+            collection.delete(ids=document_ids)
+            removed_from.append(info.name)
+        except Exception as error:
+            print(f"[Chroma] Aviso ao remover documentos da coleção '{info.name}': {error}")
+
+    if removed_from:
+        _log_audit_event(
+            "Chroma cleanup",
+            f"Documentos removidos: {document_ids} das coleções {removed_from}",
+        )
+
+
+def save_idea_entities(idea_content: str, entities: Dict[str, str]) -> None:
+    """
+    Registra uma ideia e suas entidades derivadas (objetivo, proxima acao, recursos).
+    """
+    if not idea_content:
+        return
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    idea_id = str(uuid.uuid4())
+    objective_text = entities.get("objective") or "Objetivo não definido"
+    next_action_text = entities.get("next_action") or "Definir próxima ação para a ideia."
+    resources_text = entities.get("resources_needed") or "Recursos não especificados."
+
+    params = {
+        "idea_id": idea_id,
+        "idea_content": idea_content,
+        "timestamp": timestamp,
+        "objective_id": str(uuid.uuid4()),
+        "objective_text": objective_text,
+        "action_id": str(uuid.uuid4()),
+        "next_action_text": next_action_text,
+        "resource_id": str(uuid.uuid4()),
+        "resources_text": resources_text,
+    }
+
+    query = """
+        MERGE (i:Ideia {id: $idea_id})
+        SET i.content = $idea_content,
+            i.created_at = datetime($timestamp)
+        MERGE (o:Objetivo {id: $objective_id})
+        SET o.description = $objective_text
+        MERGE (a:Acao {id: $action_id})
+        SET a.description = $next_action_text
+        MERGE (r:Recurso {id: $resource_id})
+        SET r.description = $resources_text
+        MERGE (i)-[:TEM_OBJETIVO]->(o)
+        MERGE (i)-[:PROXIMA_ACAO]->(a)
+        MERGE (i)-[:PRECISA]->(r)
+    """
+
+    with neo4j_driver.session() as session:
+        session.execute_write(lambda tx: tx.run(query, **params))
+
+    _log_audit_event(
+        "Ideia registrada",
+        f"Ideia '{idea_id}' armazenada com próxima ação '{next_action_text}'.",
+    )
 
 
 def _normalize_confidence(value: Any, default: float = 0.0) -> float:

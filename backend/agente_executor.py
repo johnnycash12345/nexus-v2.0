@@ -1,5 +1,6 @@
 import datetime
 import os
+import shlex
 import subprocess
 from typing import Any, Dict, List
 
@@ -13,6 +14,27 @@ llm_client = OpenAI(
     base_url="https://api.deepseek.com",
 )
 nqr = NexusQuantumReasoning()
+ALLOWED_COMMANDS = {
+    "ls",
+    "pwd",
+    "whoami",
+    "echo",
+    "dir",
+    "cat",
+    "type",
+}
+
+
+def _is_command_allowed(command: str) -> bool:
+    if not command:
+        return False
+    if any(token in command for token in ["&&", "||", ";", "|"]):
+        return False
+    try:
+        first_token = shlex.split(command)[0].lower()
+    except ValueError:
+        return False
+    return first_token in ALLOWED_COMMANDS
 
 
 def _collect_current_state() -> str:
@@ -44,6 +66,9 @@ def simulate_command(command: str, current_state: str) -> str:
         "Simule a execução do comando no estado atual do sistema. "
         "Retorne APENAS o resultado exato que o terminal ou navegador retornaria."
     )
+    if not _is_command_allowed(command):
+        return "Comando bloqueado pela politica de segurança do executor."
+
     user_prompt = (
         f"ESTADO ATUAL:\n{current_state}\n\n"
         f"COMANDO A SIMULAR:\n{command}"
@@ -64,6 +89,9 @@ def simulate_command(command: str, current_state: str) -> str:
 
 
 def _run_command(command: str) -> str:
+    if not _is_command_allowed(command):
+        raise ValueError("Comando não permitido pelo executor seguro.")
+
     try:
         completed = subprocess.run(
             command,
@@ -75,10 +103,12 @@ def _run_command(command: str) -> str:
         output = completed.stdout.strip()
         if completed.returncode != 0:
             error_text = completed.stderr.strip()
-            return error_text or output or f"(retorno {completed.returncode} sem saída)"
+            raise RuntimeError(error_text or output or f"Retorno {completed.returncode} sem saída")
         return output or "(comando executado sem saída)"
+    except ValueError:
+        raise
     except Exception as error:  # noqa: BLE001
-        return f"ERRO AO EXECUTAR COMANDO: {error}"
+        raise RuntimeError(f"Erro ao executar comando: {error}") from error
 
 
 def _looks_like_command(item_type: str, item_content: str) -> bool:
@@ -118,7 +148,12 @@ def execute_task(item_type: str, item_content: str) -> str:
             replanning_notes.append(replanning.get("message", "Plano ajustado pelo NQR."))
             command_to_execute = new_command
 
-        real_result = _run_command(command_to_execute)
+        try:
+            real_result = _run_command(command_to_execute)
+        except ValueError as error:
+            return f"Comando bloqueado: {error}"
+        except RuntimeError as error:
+            return f"Falha ao executar comando real: {error}"
 
         log_message = (
             f"[{datetime.datetime.now().isoformat()}] - EXECUCAO DE COMANDO\n"
@@ -191,7 +226,7 @@ def execute_dynamic_tool(tool_name: str, arguments: Dict[str, Any] | None = None
     Executa dinamicamente uma ferramenta registrada via DeepSeek Function Calling.
     """
     if not tool_name:
-        return "Nenhuma ferramenta especificada."
+        raise ValueError("Nenhuma ferramenta especificada.")
 
     arguments = arguments or {}
 
@@ -202,17 +237,14 @@ def execute_dynamic_tool(tool_name: str, arguments: Dict[str, Any] | None = None
             tool_function = tool_info.get("function")
 
     if not callable(tool_function):
-        return f"A ferramenta '{tool_name}' não está disponível."
+        raise ValueError(f"A ferramenta '{tool_name}' não está disponível.")
 
     try:
         result = tool_function(**arguments)
-    except TypeError:
-        try:
-            result = tool_function(arguments)
-        except Exception as error:
-            return f"Erro ao executar '{tool_name}': {error}"
+    except TypeError as error:
+        raise ValueError(f"Argumentos inválidos: {error}") from error
     except Exception as error:  # noqa: BLE001
-        return f"Erro ao executar '{tool_name}': {error}"
+        raise RuntimeError(f"Erro ao executar '{tool_name}': {error}") from error
 
     if isinstance(result, str):
         return result

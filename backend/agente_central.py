@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from openai import OpenAI
@@ -10,7 +11,7 @@ from openai import OpenAI
 import agente_guardiao
 import ferramentas
 import database
-from models import AISettings, OperationMode
+from models import AISettings, OperationMode, SystemLog
 
 # Clientes pre-configurados
 deepseek_client = OpenAI(
@@ -228,6 +229,28 @@ def generate_diagnostic_message(failed_services: Dict[str, str]) -> str:
     except Exception as error:  # noqa: BLE001
         print(f"[Agente Central] Falha ao gerar mensagem de diagnostico: {error}")
         return f"Falhas detectadas: {summary_text}"
+
+
+def _log_ofbd_decision(
+    status: str,
+    user_query: str,
+    tool_plan: Dict[str, Any],
+    detail: str | None = None,
+) -> None:
+    try:
+        log = SystemLog(
+            timestamp=datetime.now().isoformat(),
+            type="ofbd",
+            title=f"OFBD {status}",
+            description=(
+                f"Query: {user_query}\nPlano: {json.dumps(tool_plan, ensure_ascii=False)}"
+                + (f"\nDetalhe: {detail}" if detail else "")
+            ),
+            agent="OFBD",
+        )
+        database.create_log(log)
+    except Exception as error:  # noqa: BLE001
+        print(f"[Agente Central] Falha ao registrar log do OFBD: {error}")
 
 
 def orchestrate_tool_use(
@@ -464,12 +487,34 @@ def classify_intent(
 
         if classified_intent in ("Pesquisa Profunda", "Chat Pessoal"):
             try:
-                available_tool_descriptions = ferramentas.get_tool_descriptions()
-                plan = orchestrate_tool_use(user_content, available_tool_descriptions)
+                descriptions = ferramentas.get_tool_descriptions()
+                plan = orchestrate_tool_use(user_content, descriptions)
                 tool_payload = plan
                 if plan.get("tool_needed"):
-                    print(f"[Agente Central] Orquestrador solicitou ferramenta: {plan}")
-                    return "Executar Ferramenta", plan
+                    tool_name = plan.get("tool_name")
+                    if tool_name not in ferramentas.AVAILABLE_TOOLS:
+                        _log_ofbd_decision(
+                            status="rejeitado",
+                            user_query=user_content,
+                            tool_plan=plan,
+                            detail="Ferramenta inexistente.",
+                        )
+                    else:
+                        try:
+                            validated_args = ferramentas.validate_tool_arguments(
+                                tool_name,
+                                plan.get("arguments") or {},
+                            )
+                            plan["arguments"] = validated_args
+                            _log_ofbd_decision("aprovado", user_content, plan)
+                            return "Executar Ferramenta", plan
+                        except ValueError as error:
+                            _log_ofbd_decision(
+                                status="rejeitado",
+                                user_query=user_content,
+                                tool_plan=plan,
+                                detail=str(error),
+                            )
             except Exception as error:  # noqa: BLE001
                 print(f"[Agente Central] Falha ao orquestrar ferramenta: {error}")
 

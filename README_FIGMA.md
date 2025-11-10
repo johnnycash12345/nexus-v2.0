@@ -94,11 +94,21 @@ Este documento descreve, em linguagem orientada para designers, tudo o que o fro
 | `/api/inbox/chat/{id}` | GET/POST | `ChatInput { content }` | Usar para conversas proativas (Executar Tarefa). Mostrar marcador “Agente Executor”. |
 | `/api/projects/new` | POST | `{ "title": str, "description": str }` | Após criação, atualizar grade de projetos. |
 | `/api/projects/{id}/files` | GET | – | Resulta em árvore de `FileNode`. Usar componente colapsável. |
-| `/api/code/generate` / `refactor` | POST | `CodeGenerateRequest { prompt }` ou `CodeRefactorRequest { code }` | Exibir output em bloco `pre`, com botão “Copiar”. |
+| `/api/code/generate` / `refactor` | POST | `CodeGenerateRequest { prompt }` ou `CodeRefactorRequest { code }` | Exibir output em bloco `pre`, com botão "Copiar". |
 | `/api/memory/graph` | GET | – | Consumir para renderizar grafo (use fallback “lista” se WebGL não estiver disponível). |
 | `/status` | GET | – | Retorna `{ services: {Neo4j: {healthy, detail}, ...}, diagnostic }`. Mostrar cards e mensagem do diagnostic. |
 
----
+### Componentes ↔ Endpoint ↔ Payload
+
+| Componente | Endpoint | Payload (request) | Expectativa de UI |
+| --- | --- | --- | --- |
+| Composer Pesquisa/Chat | `POST /api/chat/send` | `{"session_id":"uuid","content":"texto"}` | Mostrar estado “Simulando/Executando ferramenta” e renderizar `PerplexicaResponse`. |
+| Drawer OFBD (Executar Ferramenta) | (payload interno) | `{"tool_name":"news_search","arguments":{"query":"IA","max_results":3}}` | Preencher campos da ferramenta com os argumentos validados e exibir resultado sintetizado. |
+| Modal Nova Ideia | `POST /api/projects/from_idea` | `{"text":"Minha ideia..."}` | Após resposta `DevProject`, exibir preview das entidades `objective`, `next_action`, `resources_needed`. |
+| Monitor de Status | `GET /status` | – | Cards coloridos por serviço + mensagem do campo `diagnostic`. |
+| Inbox Proativo | `GET/POST /api/inbox/chat/{id}` | `{"content":"sim"} (POST)` | Interface de chat com badges do Agente Executor; confirmar execução quando resposta sinalizar sucesso. |
+
+--- 
 
 ## 7. Guia Visual
 
