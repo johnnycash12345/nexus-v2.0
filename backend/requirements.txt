@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+fastapi-cors
+neo4j
+chromadb-client
+sentence-transformers
+onnxruntime
+openai
+tavily-python
+python-dotenv
+requests

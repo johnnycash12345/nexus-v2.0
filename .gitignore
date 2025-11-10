@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+.vscode/
+*.log
+coverage/
+tmp/
+*.local
+*.cache

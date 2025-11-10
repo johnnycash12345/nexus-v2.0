@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: nexus_neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/nexuspassword123
+    volumes:
+      - neo4j_data:/data
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: nexus_chroma
+    ports:
+      - "8005:8000"
+    volumes:
+      - chroma_data:/chroma/.chroma/
+
+volumes:
+  neo4j_data:
+  chroma_data:
+
+
